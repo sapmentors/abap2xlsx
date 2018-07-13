@@ -5,18 +5,23 @@ class ZCL_EXCEL_COMMON definition
 
 *"* public components of class ZCL_EXCEL_COMMON
 *"* do not include other source files here!!!
+*"* protected components of class ZCL_EXCEL_COMMON
+*"* do not include other source files here!!!
+*"* protected components of class ZCL_EXCEL_COMMON
+*"* do not include other source files here!!!
 public section.
+  type-pools ABAP .
 
   constants C_EXCEL_BASELINE_DATE type D value '19000101'. "#EC NOTEXT
-  class-data C_EXCEL_NUMFMT_OFFSET type INT1 value 164. "#EC NOTEXT .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  . " .
+  class-data C_EXCEL_NUMFMT_OFFSET type INT1 value 164. "#EC NOTEXT
   constants C_EXCEL_SHEET_MAX_COL type INT4 value 16384. "#EC NOTEXT
   constants C_EXCEL_SHEET_MIN_COL type INT4 value 1. "#EC NOTEXT
   constants C_EXCEL_SHEET_MAX_ROW type INT4 value 1048576. "#EC NOTEXT
   constants C_EXCEL_SHEET_MIN_ROW type INT4 value 1. "#EC NOTEXT
-  class-data C_SPRAS_EN type SPRAS value 'E'. "#EC NOTEXT .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  . " .
+  class-data C_SPRAS_EN type SPRAS value 'E'. "#EC NOTEXT
   class-data O_CONV type ref to CL_ABAP_CONV_OUT_CE .
   constants C_EXCEL_1900_LEAP_YEAR type D value '19000228'. "#EC NOTEXT
-  class-data C_XLSX_FILE_FILTER type STRING value 'Excel Workbook (*.xlsx)|*.xlsx|'. "#EC NOTEXT .  .  .  .  .  .  . " .
+  class-data C_XLSX_FILE_FILTER type STRING value 'Excel Workbook (*.xlsx)|*.xlsx|'. "#EC NOTEXT
 
   class-methods CLASS_CONSTRUCTOR .
   class-methods DESCRIBE_STRUCTURE
@@ -44,6 +49,13 @@ public section.
     exporting
       !E_COLUMN type ZEXCEL_CELL_COLUMN_ALPHA
       !E_ROW type ZEXCEL_CELL_ROW .
+  class-methods CONVERT_COLUMN_A_ROW2COLUMNROW
+    importing
+      !IP_COLUMN type CLIKE optional
+      !IP_COLUMN_INT type NUMERIC optional
+      !IP_ROW type NUMERIC
+    returning
+      value(RV_COLUMNROW) type STRING .
   class-methods CONVERT_RANGE2COLUMN_A_ROW
     importing
       !I_RANGE type CLIKE
@@ -125,7 +137,6 @@ public section.
       !IP_VALUE type T
     returning
       value(EP_VALUE) type ZEXCEL_CELL_VALUE .
-  type-pools ABAP .
   class-methods ASSERT_EQUALS
     importing
       !EXP type ANY
@@ -196,10 +207,11 @@ public section.
       value(RP_IN_RANGE) type ABAP_BOOL
     raising
       ZCX_EXCEL .
-*"* protected components of class ZCL_EXCEL_COMMON
-*"* do not include other source files here!!!
-*"* protected components of class ZCL_EXCEL_COMMON
-*"* do not include other source files here!!!
+  class-methods GET_GUID_OF
+    importing
+      !IP_GUID type ANY
+    returning
+      value(RV_GUID) type ZEXCEL_CELL_STYLE .
 protected section.
 private section.
 
@@ -639,6 +651,31 @@ method CONVERT_COLUMNROW2COLUMN_A_ROW.
 endmethod.
 
 
+  method CONVERT_COLUMN_A_ROW2COLUMNROW.
+
+    DATA:
+      lv_row_alpha              TYPE string,
+      lv_col_alpha              TYPE zexcel_cell_column_alpha.
+
+    IF IP_COLUMN_INT IS NOT INITIAL.
+      lv_col_alpha = zcl_excel_common=>convert_column2alpha( ip_column_int ).
+    ELSEIF IP_COLUMN IS NOT INITIAL.
+      lv_col_alpha = ip_column.
+    ELSE.
+      RAISE EXCEPTION TYPE zcx_excel
+        EXPORTING
+          error = 'No column specified'.
+    ENDIF.
+    CONDENSE lv_col_alpha NO-GAPS.
+
+    lv_row_alpha = ip_row.
+    CONDENSE lv_row_alpha NO-GAPS.
+
+    CONCATENATE lv_col_alpha lv_row_alpha INTO RV_COLUMNROW.  " issue #155 - less restrictive typing for ip_column
+
+  endmethod.
+
+
 method CONVERT_RANGE2COLUMN_A_ROW.
 *--------------------------------------------------------------------*
 * issue #230   - Pimp my Code
@@ -1047,6 +1084,33 @@ METHOD get_fieldcatalog.
   ENDLOOP.
 
 ENDMETHOD.
+
+
+  method GET_GUID_OF.
+
+    DATA: lo_style_type type ref to cl_abap_typedescr.
+    FIELD-SYMBOLS:
+      <style> TYPE REF TO ZCL_EXCEL_STYLE.
+
+    CHECK ip_guid IS NOT INITIAL.
+
+    lo_style_type = cl_abap_typedescr=>describe_by_data( ip_guid ).
+    IF lo_style_type->type_kind = lo_style_type->typekind_oref.
+      lo_style_type = cl_abap_typedescr=>describe_by_object_ref( ip_guid ).
+      IF lo_style_type->absolute_name = '\CLASS=ZCL_EXCEL_STYLE'.
+        ASSIGN ip_guid TO <style>.
+        rv_guid = <style>->get_guid( ).
+      ENDIF.
+
+    ELSEIF lo_style_type->absolute_name = '\TYPE=ZEXCEL_CELL_STYLE'.
+      rv_guid = ip_guid.
+
+    ELSEIF lo_style_type->type_kind = lo_style_type->typekind_hex.
+      rv_guid = ip_guid.
+
+    ENDIF.
+
+  endmethod.
 
 
 method IS_CELL_IN_RANGE.
