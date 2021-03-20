@@ -41,7 +41,9 @@ protected section.
       !IO_DOCUMENT type ref to IF_IXML_DOCUMENT
       !IO_WORKSHEET type ref to ZCL_EXCEL_WORKSHEET
     returning
-      value(RV_IXML_SHEET_DATA_ROOT) type ref to IF_IXML_ELEMENT .
+      value(RV_IXML_SHEET_DATA_ROOT) type ref to IF_IXML_ELEMENT
+    raising
+      ZCX_EXCEL .
   methods ADD_FURTHER_DATA_TO_ZIP
     importing
       !IO_ZIP type ref to CL_ABAP_ZIP .
@@ -196,6 +198,13 @@ private section.
 
 *"* private components of class ZCL_EXCEL_WRITER_2007
 *"* do not include other source files here!!!
+  types: begin of MTY_COLUMN_FORMULA_USED,
+           ID type ZEXCEL_S_CELL_DATA-COLUMN_FORMULA_ID,
+           SI type STRING,
+           "! type: shared, etc.
+           T  type STRING,
+         end of MTY_COLUMN_FORMULA_USED,
+         MTY_COLUMN_FORMULAS_USED type hashed table of MTY_COLUMN_FORMULA_USED with unique key ID.
   constants C_OFF type STRING value '0'. "#EC NOTEXT
   constants C_ON type STRING value '1'. "#EC NOTEXT
   constants C_XL_PRINTERSETTINGS type STRING value 'xl/printerSettings/printerSettings#.bin'. "#EC NOTEXT
@@ -205,6 +214,45 @@ private section.
       !IP_FLAG type FLAG
     returning
       value(EP_BOOLEAN) type CHAR5 .
+  methods CREATE_XL_SHEET_IGNORED_ERRORS
+    importing
+      IO_WORKSHEET    type ref to ZCL_EXCEL_WORKSHEET
+      IO_DOCUMENT     type ref to IF_IXML_DOCUMENT
+      IO_ELEMENT_ROOT type ref to IF_IXML_ELEMENT.
+  "! <p class="shorttext synchronized" lang="en">Add column formula to table cell, eventually shared</p>
+  "! Formulas are "shared" if they contain only relative references (A2) in the same sheet, for instance:
+  "! <ul>
+  "! <li>&lt;c r="B2">&lt;f t="shared" ref="B2:B4" si="0">IF(A2="ROW2","ROW2","X")&lt;/f>&lt;/c></li>
+  "! <li>&lt;c r="B3">&lt;f t="shared" si="0"/>&lt;/c></li>
+  "! <li>&lt;c r="B4">&lt;f t="shared" si="0"/>&lt;/c></li>
+  "! </ul>
+  "! Other formulas are not shared, like:
+  "! <ul>
+  "! <li>&lt;c r="B5">&lt;f>Table[[#This Row],[Column]]&lt;/f>&lt;/c></li>
+  "! <li>&lt;c r="B5">&lt;f>OtherSheet!B5&lt;/f>&lt;/c></li>
+  "! </ul>
+  "! @parameter io_document | <p class="shorttext synchronized" lang="en">XML Document</p>
+  "! @parameter it_column_formulas | <p class="shorttext synchronized" lang="en">Repository of all WorkSheet column formulas</p>
+  "! @parameter is_sheet_content | <p class="shorttext synchronized" lang="en">Cell content</p>
+  methods CREATE_XL_SHEET_COLUMN_FORMULA
+    importing
+      IO_DOCUMENT             type ref to IF_IXML_DOCUMENT
+      IT_COLUMN_FORMULAS      type ZCL_EXCEL_WORKSHEET=>MTY_TH_COLUMN_FORMULA
+      IS_SHEET_CONTENT        type ZEXCEL_S_CELL_DATA
+    exporting
+      EO_ELEMENT              type ref to IF_IXML_ELEMENT
+    changing
+      CT_COLUMN_FORMULAS_USED type MTY_COLUMN_FORMULAS_USED
+      CV_SI                   type I
+    raising
+      ZCX_EXCEL.
+  methods IS_FORMULA_SHAREABLE
+    importing
+      IP_FORMULA          type STRING
+    returning
+      value(EP_SHAREABLE) type ABAP_BOOL
+    raising
+      ZCX_EXCEL.
 ENDCLASS.
 
 
@@ -5277,6 +5325,11 @@ METHOD create_xl_sheet.
   ENDIF.
 *
 
+*******************************
+* ignoredErrors
+*******************************
+  create_xl_sheet_ignored_errors( io_worksheet = io_worksheet io_document = lo_document io_element_root = lo_element_root ).
+
 * tables
   DATA lv_table_count TYPE i.
 
@@ -5313,6 +5366,168 @@ METHOD create_xl_sheet.
 * STEP 5: Create xstring stream
   ep_content = render_xml_document( lo_document ).
 
+ENDMETHOD.
+
+
+METHOD create_xl_sheet_column_formula.
+
+  TYPES: ls_column_formula_used     TYPE mty_column_formula_used,
+         lv_column_alpha            TYPE zexcel_cell_column_alpha,
+         lv_top_cell_coords         TYPE zexcel_cell_coords,
+         lv_bottom_cell_coords      TYPE zexcel_cell_coords,
+         lv_cell_coords             TYPE zexcel_cell_coords,
+         lv_ref_value               TYPE string,
+         lv_test_shared             TYPE string,
+         lv_si                      TYPE i,
+         lv_1st_line_shared_formula TYPE abap_bool.
+  DATA: lv_value                   TYPE string,
+        ls_column_formula_used     TYPE mty_column_formula_used,
+        lv_column_alpha            TYPE zexcel_cell_column_alpha,
+        lv_top_cell_coords         TYPE zexcel_cell_coords,
+        lv_bottom_cell_coords      TYPE zexcel_cell_coords,
+        lv_cell_coords             TYPE zexcel_cell_coords,
+        lv_ref_value               TYPE string,
+        lv_1st_line_shared_formula TYPE abap_bool.
+  FIELD-SYMBOLS: <ls_column_formula>      TYPE zcl_excel_worksheet=>mty_s_column_formula,
+                 <ls_column_formula_used> TYPE mty_column_formula_used.
+
+
+  READ TABLE it_column_formulas WITH TABLE KEY id = is_sheet_content-column_formula_id ASSIGNING <ls_column_formula>.
+  ASSERT sy-subrc = 0.
+
+  lv_value = <ls_column_formula>-formula.
+  lv_1st_line_shared_formula = abap_false.
+  eo_element = io_document->create_simple_element( name   = 'f'
+                                                   parent = io_document ).
+  READ TABLE ct_column_formulas_used WITH TABLE KEY id = is_sheet_content-column_formula_id ASSIGNING <ls_column_formula_used>.
+  IF sy-subrc <> 0.
+    CLEAR ls_column_formula_used.
+    ls_column_formula_used-id = is_sheet_content-column_formula_id.
+    IF is_formula_shareable( ip_formula = lv_value ) = abap_true.
+      ls_column_formula_used-t = 'shared'.
+      ls_column_formula_used-si = cv_si.
+      CONDENSE ls_column_formula_used-si.
+      cv_si = cv_si + 1.
+      lv_1st_line_shared_formula = abap_true.
+    ENDIF.
+    INSERT ls_column_formula_used INTO TABLE ct_column_formulas_used ASSIGNING <ls_column_formula_used>.
+  ENDIF.
+
+  IF lv_1st_line_shared_formula = abap_true OR <ls_column_formula_used>-t <> 'shared'.
+    lv_column_alpha = zcl_excel_common=>convert_column2alpha( ip_column = is_sheet_content-cell_column ).
+    lv_top_cell_coords = |{ lv_column_alpha }{ <ls_column_formula>-table_top_left_row + 1 }|.
+    lv_bottom_cell_coords = |{ lv_column_alpha }{ <ls_column_formula>-table_bottom_right_row + 1 }|.
+    lv_cell_coords = |{ lv_column_alpha }{ is_sheet_content-cell_row }|.
+    IF lv_top_cell_coords = lv_cell_coords.
+      lv_ref_value = |{ lv_top_cell_coords }:{ lv_bottom_cell_coords }|.
+    ELSE.
+      lv_ref_value = |{ lv_cell_coords }:{ lv_bottom_cell_coords }|.
+      lv_value = zcl_excel_common=>shift_formula(
+          iv_reference_formula = lv_value
+          iv_shift_cols        = 0
+          iv_shift_rows        = is_sheet_content-cell_row - <ls_column_formula>-table_top_left_row - 1 ).
+    ENDIF.
+  ENDIF.
+
+  IF <ls_column_formula_used>-t = 'shared'.
+    eo_element->set_attribute( name  = 't'
+                               value = <ls_column_formula_used>-t ).
+    eo_element->set_attribute( name  = 'si'
+                               value = <ls_column_formula_used>-si ).
+    IF lv_1st_line_shared_formula = abap_true.
+      eo_element->set_attribute( name  = 'ref'
+                                 value = lv_ref_value ).
+      eo_element->set_value( value = lv_value ).
+    ENDIF.
+  ELSE.
+    eo_element->set_value( value = lv_value ).
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD create_xl_sheet_ignored_errors.
+  DATA: lo_element        TYPE REF TO if_ixml_element,
+        lo_element2       TYPE REF TO if_ixml_element,
+        lt_ignored_errors TYPE zcl_excel_worksheet=>mty_th_ignored_errors.
+  FIELD-SYMBOLS: <ls_ignored_errors> TYPE zcl_excel_worksheet=>mty_s_ignored_errors.
+
+  lt_ignored_errors = io_worksheet->get_ignored_errors( ).
+
+  IF lt_ignored_errors IS NOT INITIAL.
+    lo_element = io_document->create_simple_element( name   = 'ignoredErrors'
+                                                     parent = io_document ).
+
+
+    LOOP AT lt_ignored_errors ASSIGNING <ls_ignored_errors>.
+
+      lo_element2 = io_document->create_simple_element( name   = 'ignoredError'
+                                                        parent = io_document ).
+
+      lo_element2->set_attribute_ns( name  = 'sqref'
+                                    value = <ls_ignored_errors>-cell_coords ).
+
+      IF <ls_ignored_errors>-eval_error = abap_true.
+        lo_element2->set_attribute_ns( name  = 'evalError'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-two_digit_text_year = abap_true.
+        lo_element2->set_attribute_ns( name  = 'twoDigitTextYear'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-number_stored_as_text = abap_true.
+        lo_element2->set_attribute_ns( name  = 'numberStoredAsText'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-formula = abap_true.
+        lo_element2->set_attribute_ns( name  = 'formula'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-formula_range = abap_true.
+        lo_element2->set_attribute_ns( name  = 'formulaRange'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-unlocked_formula = abap_true.
+        lo_element2->set_attribute_ns( name  = 'unlockedFormula'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-empty_cell_reference = abap_true.
+        lo_element2->set_attribute_ns( name  = 'emptyCellReference'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-list_data_validation = abap_true.
+        lo_element2->set_attribute_ns( name  = 'listDataValidation'
+                                       value = '1' ).
+      ENDIF.
+      IF <ls_ignored_errors>-calculated_column = abap_true.
+        lo_element2->set_attribute_ns( name  = 'calculatedColumn'
+                                       value = '1' ).
+      ENDIF.
+
+      lo_element->append_child( lo_element2 ).
+
+    ENDLOOP.
+
+    io_element_root->append_child( lo_element ).
+
+  ENDIF.
+
+ENDMETHOD.
+
+
+METHOD is_formula_shareable.
+  DATA: lv_test_shared TYPE string.
+
+  ep_shareable = abap_false.
+  IF ip_formula NA '!'.
+    lv_test_shared = zcl_excel_common=>shift_formula(
+        iv_reference_formula = ip_formula
+        iv_shift_cols        = 1
+        iv_shift_rows        = 1 ).
+    IF lv_test_shared <> ip_formula.
+      ep_shareable = abap_true.
+    ENDIF.
+  ENDIF.
 ENDMETHOD.
 
 
@@ -5689,7 +5904,9 @@ METHOD create_xl_sheet_sheet_data.
         lo_element_4           TYPE REF TO if_ixml_element,
 
         lv_value               TYPE string,
-        lv_style_guid          TYPE zexcel_cell_style.
+        lv_style_guid          TYPE zexcel_cell_style,
+        lt_column_formulas_used TYPE mty_column_formulas_used,
+        lv_si                   TYPE i.
 
   FIELD-SYMBOLS: <ls_sheet_content> TYPE zexcel_s_cell_data,
                  <ls_row_outline>   LIKE LINE OF lts_row_outlines.
@@ -5951,6 +6168,18 @@ METHOD create_xl_sheet_sheet_data.
       CONDENSE lv_value.
       lo_element_4->set_value( value = lv_value ).
       lo_element_3->append_child( new_child = lo_element_4 ). " fomula node
+    ELSEIF <ls_sheet_content>-column_formula_id <> 0.
+      create_xl_sheet_column_formula(
+        EXPORTING
+          io_document             = io_document
+          it_column_formulas      = io_worksheet->column_formulas
+          is_sheet_content        = <ls_sheet_content>
+        IMPORTING
+          eo_element              = lo_element_4
+        CHANGING
+          ct_column_formulas_used = lt_column_formulas_used
+          cv_si                   = lv_si ).
+      lo_element_3->append_child( new_child = lo_element_4 ).
     ELSEIF <ls_sheet_content>-cell_value IS NOT INITIAL           "cell can have just style or formula
        AND <ls_sheet_content>-cell_value <> lc_dummy_cell_content.
       IF <ls_sheet_content>-data_type IS NOT INITIAL.
@@ -7051,6 +7280,7 @@ METHOD create_xl_table.
         lo_element_root   TYPE REF TO if_ixml_element,
         lo_element        TYPE REF TO if_ixml_element,
         lo_element2       TYPE REF TO if_ixml_element,
+        lo_element3       TYPE REF TO if_ixml_element,
         lv_table_name         TYPE string,
         lv_id                 TYPE i,
         lv_match              TYPE i,
@@ -7146,6 +7376,15 @@ METHOD create_xl_table.
     IF ls_fieldcat-totals_function IS NOT INITIAL.
       lo_element2->set_attribute_ns( name  = 'totalsRowFunction'
                                         value = ls_fieldcat-totals_function ).
+    ENDIF.
+
+    IF ls_fieldcat-column_formula IS NOT INITIAL.
+      lv_value = ls_fieldcat-column_formula.
+      CONDENSE lv_value.
+      lo_element3 = lo_document->create_simple_element_ns( name   = 'calculatedColumnFormula'
+                                                           parent = lo_element2 ).
+      lo_element3->set_value( lv_value ).
+      lo_element2->append_child( new_child = lo_element3 ).
     ENDIF.
 
     lo_element->append_child( new_child = lo_element2 ).
